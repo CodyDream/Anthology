@@ -31,6 +31,7 @@
     <Project Path="Prism/Prism/Prowl.Prism.csproj" />
     <Project Path="Courier/Courier/Prowl.Courier.csproj" />
     <Project Path="CDS.ProwlFork.MCP/CDS.ProwlFork.MCP/CDS.ProwlFork.MCP.csproj" />
+    <Project Path="CDS.ProwlFork.United/CDS.ProwlFork.United/CDS.ProwlFork.United.csproj" />
   </Folder>
   <Folder Name="/Tooling/">
     <Project Path="Echo/Echo.SourceGenerator/Echo.SourceGenerator.csproj" />
