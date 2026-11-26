@@ -58,6 +58,29 @@ internal static class ShaderHlslTranslator
         @"\bfixed([234]?)\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    private static readonly Regex IdentifierAtStart = new(
+        @"^[A-Za-z_]\w*",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Matches a (possibly comma-separated) variable declaration such as
+    /// <c>float4 _SunDiskColor, _SunCoreColor, _SunHaloColor;</c>.
+    /// </summary>
+    private static readonly Regex VariableDeclaration = new(
+        @"^(?<indent>\s*)(?<prefix>(?:(?:uniform|static|const|extern|shared|groupshared)\s+)*)(?<type>(?:float|int|uint|half|double|bool|fixed)\d?|Texture2D|TextureCube|Texture3D|SamplerState)\b\s+(?<declarators>[^;{}]+);(?<trailing>.*)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Unity-only macros that are not valid Slang and must not be copied into
+    /// the generated module. Their equivalents are emitted as uniform globals
+    /// by <see cref="UnityShaderTranspiler"/>.
+    /// </summary>
+    private static readonly string[] UnityMacroPrefixes =
+    {
+        "CBUFFER_START(", "CBUFFER_END", "TEXTURE2D(", "TEXTURECUBE(",
+        "TEXTURE3D(", "TEXTURE2D_ARRAY(", "SAMPLER(", "SAMPLER_CMP("
+    };
+
     private static readonly Dictionary<string, string> BuiltinTypes = new(StringComparer.Ordinal)
     {
         ["UNITY_MATRIX_MVP"] = "float4x4",
@@ -126,10 +149,18 @@ internal static class ShaderHlslTranslator
         var usedAppData = new List<string>();
         var entries = new Dictionary<string, string>(StringComparer.Ordinal);
 
+        // Names for which UnityShaderTranspiler emits a global (uniform) in
+        // the generated Slang. Any HLSL declaration of one of these names is
+        // a duplicate and must be removed from the copied source.
+        var emittedGlobals = new HashSet<string>(StringComparer.Ordinal);
         foreach (ShaderProperty property in properties)
         {
+            emittedGlobals.Add(property.Name);
             if (property.Type is "2D" or "Cube" or "3D")
+            {
                 samplersEmitted.Add(property.Name + "Sampler");
+                emittedGlobals.Add(property.Name + "Sampler");
+            }
         }
 
         void WarnOnce(string key, string message)
@@ -320,6 +351,28 @@ internal static class ShaderHlslTranslator
                 continue;
             }
 
+            string? unityMacro = FindUnityMacro(trimmed);
+            if (unityMacro is not null)
+            {
+                WarnOnce(
+                    "unity-macro:" + unityMacro,
+                    $"Unity macro '{unityMacro}' has no Slang equivalent; the line was commented out (its uniforms and textures are emitted separately).");
+                output.Add("// [untranslated] " + line);
+                continue;
+            }
+
+            if (TryStripDuplicateDeclarations(line, emittedGlobals, out string deduplicated, out List<string> removed))
+            {
+                string action = deduplicated.StartsWith("// [deduplicated]", StringComparison.Ordinal)
+                    ? "was commented out"
+                    : "was rewritten";
+                warnings.Add(
+                    $"HLSL declaration '{line.Trim()}' {action} because {string.Join(", ", removed)} " +
+                    "are already emitted as generated ShaderLab uniform globals; the generated 'uniform' declarations are the single binding point.");
+                output.Add(deduplicated);
+                continue;
+            }
+
             Match sampler = SamplerDeclaration.Match(trimmed);
             if (sampler.Success)
             {
@@ -402,6 +455,71 @@ internal static class ShaderHlslTranslator
         translation.DeclaredNames.UnionWith(declared);
         translation.Warnings.AddRange(warnings);
         return translation;
+    }
+
+    /// <summary>Returns the macro name when a line starts with a Unity-only macro.</summary>
+    private static string? FindUnityMacro(string trimmed)
+    {
+        foreach (string prefix in UnityMacroPrefixes)
+        {
+            if (!trimmed.StartsWith(prefix, StringComparison.Ordinal))
+                continue;
+
+            return prefix.EndsWith("(", StringComparison.Ordinal)
+                ? prefix.Substring(0, prefix.Length - 1)
+                : prefix;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Removes every declarator that is already emitted as a Slang uniform
+    /// global. Handles comma-separated declarations; a line whose declarators
+    /// were all duplicates is turned into a comment.
+    /// </summary>
+    private static bool TryStripDuplicateDeclarations(
+        string line,
+        HashSet<string> emittedGlobals,
+        out string result,
+        out List<string> removed)
+    {
+        result = line;
+        removed = new List<string>();
+
+        Match declaration = VariableDeclaration.Match(line);
+        if (!declaration.Success)
+            return false;
+
+        var kept = new List<string>();
+        foreach (string part in SplitArguments(declaration.Groups["declarators"].Value))
+        {
+            string declarator = part.Trim();
+            Match identifier = IdentifierAtStart.Match(declarator);
+            if (identifier.Success && emittedGlobals.Contains(identifier.Value))
+                removed.Add(identifier.Value);
+            else
+                kept.Add(declarator);
+        }
+
+        if (removed.Count == 0)
+            return false;
+
+        if (kept.Count == 0)
+        {
+            result = "// [deduplicated] " + line;
+        }
+        else
+        {
+            result = declaration.Groups["indent"].Value +
+                     declaration.Groups["prefix"].Value +
+                     declaration.Groups["type"].Value + " " +
+                     string.Join(", ", kept) + ";" +
+                     declaration.Groups["trailing"].Value +
+                     "  // [deduplicated] " + string.Join(", ", removed);
+        }
+
+        return true;
     }
 
     private static void HandlePragma(

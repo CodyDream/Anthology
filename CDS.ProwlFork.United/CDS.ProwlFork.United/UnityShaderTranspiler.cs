@@ -2,7 +2,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace CDS.ProwlFork.United;
 
@@ -39,6 +41,27 @@ public sealed record TranspiledShader(
 /// </remarks>
 public static class UnityShaderTranspiler
 {
+    /// <summary>
+    /// Platform/variant symbols that must always have a concrete value in the
+    /// generated Slang, otherwise <c>#if SYMBOL</c> blocks fail to compile.
+    /// </summary>
+    private static readonly (string Name, string Value)[] PreprocessorShims =
+    {
+        ("UNITY_REVERSED_Z", "0"),
+        ("UNITY_UV_STARTS_AT_TOP", "1"),
+        ("UNITY_SINGLE_PASS_STEREO", "0"),
+        ("STEREO_CUBEMAP_RENDER_ON", "0"),
+        ("SHADER_API_GLES", "0")
+    };
+
+    private static readonly Regex PreprocessorSymbol = new(
+        @"\b(?:UNITY_[A-Z0-9_]+|STEREO_[A-Z0-9_]+|SHADER_API_[A-Z0-9_]+)\b",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex DefinedSymbol = new(
+        @"^#define\s+([A-Za-z_]\w*)",
+        RegexOptions.CultureInvariant);
+
     /// <summary>Translates a ShaderLab shader to a Slang module.</summary>
     /// <param name="source">Contents of a Unity <c>.shader</c> file.</param>
     /// <param name="name">Optional name override for the generated header comment.</param>
@@ -151,14 +174,10 @@ public static class UnityShaderTranspiler
         List<string> warnings,
         string originalSource)
     {
-        var declared = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var section in sections)
-            foreach (string identifier in section.Translation.DeclaredNames)
-                declared.Add(identifier);
-
-        // Collect property diagnostics before rendering the warning header so
-        // the in-source warning list matches the returned Warnings collection.
-        CollectPropertyWarnings(properties, declared, warnings);
+        // Collect all diagnostics before rendering the warning header so the
+        // in-source warning list matches the returned Warnings collection.
+        CollectPropertyWarnings(properties, warnings);
+        List<string> shimLines = BuildPreprocessorShims(originalSource, warnings);
 
         var sb = new StringBuilder();
         AppendLine(sb, "// ---------------------------------------------------------------------------");
@@ -168,7 +187,14 @@ public static class UnityShaderTranspiler
         AppendLine(sb, "");
 
         AppendWarnings(sb, warnings);
-        AppendPropertyBlock(sb, properties, declared);
+        if (shimLines.Count > 0)
+        {
+            foreach (string line in shimLines)
+                AppendLine(sb, line);
+            AppendLine(sb, "");
+        }
+
+        AppendPropertyBlock(sb, properties);
         AppendGeneratedDeclarations(sb, sections);
         AppendCode(sb, sections);
         AppendOriginalSource(sb, originalSource, "Original ShaderLab/HLSL source (verbatim, line-commented):");
@@ -194,19 +220,79 @@ public static class UnityShaderTranspiler
         AppendLine(sb, "");
     }
 
+    /// <summary>
+    /// Builds the <c>#define</c> prefix that gives Unity platform/variant
+    /// conditionals a concrete value in Slang. Symbols the source defines
+    /// itself are left untouched.
+    /// </summary>
+    private static List<string> BuildPreprocessorShims(string originalSource, List<string> warnings)
+    {
+        var defined = new HashSet<string>(StringComparer.Ordinal);
+        var used = new List<string>();
+        var usedSet = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (string rawLine in originalSource.Split('\n'))
+        {
+            string line = rawLine.Trim();
+            Match define = DefinedSymbol.Match(line);
+            if (define.Success)
+            {
+                defined.Add(define.Groups[1].Value);
+                continue;
+            }
+
+            if (!line.StartsWith("#", StringComparison.Ordinal))
+                continue;
+
+            foreach (Match match in PreprocessorSymbol.Matches(line))
+            {
+                string symbol = match.Value;
+                if (!defined.Contains(symbol) && usedSet.Add(symbol))
+                    used.Add(symbol);
+            }
+        }
+
+        var shims = new List<(string Name, string Value)>();
+        var emitted = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var shim in PreprocessorShims)
+        {
+            if (defined.Contains(shim.Name) || !emitted.Add(shim.Name))
+                continue;
+            shims.Add(shim);
+        }
+
+        foreach (string symbol in used)
+        {
+            if (defined.Contains(symbol) || !emitted.Add(symbol))
+                continue;
+            shims.Add((symbol, "0"));
+        }
+
+        if (shims.Count == 0)
+            return new List<string>();
+
+        warnings.Add(
+            "Unity platform/variant preprocessor symbols were flattened to fixed #define shims (" +
+            string.Join(", ", shims.Select(s => $"{s.Name}={s.Value}")) +
+            "); only one variant is represented. Review #if/#ifdef blocks manually.");
+
+        var lines = new List<string>
+        {
+            "// ---------------------------------------------------------------------------",
+            "// Unity preprocessor shims - platform variants are flattened to these values.",
+            "// ---------------------------------------------------------------------------"
+        };
+        foreach (var shim in shims)
+            lines.Add($"#define {shim.Name} {shim.Value}");
+        return lines;
+    }
+
     private static void CollectPropertyWarnings(
         IReadOnlyList<ShaderProperty> properties,
-        HashSet<string> declared,
         List<string> warnings)
     {
         foreach (ShaderProperty property in properties)
         {
-            if (declared.Contains(property.Name))
-            {
-                warnings.Add(
-                    $"Property '{property.Name}' is declared in the HLSL code; the generated global was omitted to avoid a duplicate declaration.");
-            }
-
             if (property.Attributes is not null)
             {
                 warnings.Add(
@@ -229,8 +315,7 @@ public static class UnityShaderTranspiler
 
     private static void AppendPropertyBlock(
         StringBuilder sb,
-        IReadOnlyList<ShaderProperty> properties,
-        HashSet<string> declared)
+        IReadOnlyList<ShaderProperty> properties)
     {
         AppendLine(sb, "// ---------------------------------------------------------------------------");
         AppendLine(sb, "// Unity ShaderLab properties - bind every one of these BY NAME.");
@@ -254,12 +339,9 @@ public static class UnityShaderTranspiler
 
         foreach (ShaderProperty property in properties)
         {
-            if (declared.Contains(property.Name))
-            {
-                AppendLine(sb, $"// {property.Name}: declared in the HLSL source; no duplicate global emitted.");
-                continue;
-            }
-
+            // Every property is emitted exactly once here. Duplicate HLSL
+            // declarations of these names are commented out by
+            // ShaderHlslTranslator while the code blocks are copied.
             string[] declarations = DeclareProperty(property).Split('\n');
             for (int i = 0; i < declarations.Length; i++)
             {
