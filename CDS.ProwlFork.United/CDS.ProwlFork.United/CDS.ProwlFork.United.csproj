@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>$(ProwlTargetFrameworks)</TargetFrameworks>
+    <RootNamespace>CDS.ProwlFork.United</RootNamespace>
+    <PackageId>CDS.ProwlFork.United</PackageId>
+    <Title>CDS.ProwlFork.United</Title>
+
+    <Description>Prowl fork utilities. Scaffolded; implementation to follow.</Description>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+</Project>
