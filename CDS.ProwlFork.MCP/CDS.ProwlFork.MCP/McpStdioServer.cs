@@ -52,6 +52,10 @@ public static class McpStdioServer
         }
     }
 
+    /// <summary>Handles one JSON-RPC line and returns the response line, or null for notifications.</summary>
+    public static string? HandleLine(string line, McpToolRegistry tools, string serverName, string version)
+        => Dispatch(line, tools, serverName, version);
+
     internal static string? Dispatch(string line, McpToolRegistry tools, string serverName, string version)
     {
         if (!McpJson.TryParseRequest(line, out McpRequest? request, out JsonElement id, out string? error, out int errorCode))

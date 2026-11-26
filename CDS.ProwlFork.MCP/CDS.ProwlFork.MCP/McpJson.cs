@@ -38,6 +38,9 @@ public static class McpJson
         error = null;
         errorCode = 0;
 
+        // PowerShell pipes and some clients prepend a UTF-8 BOM, which JsonDocument rejects.
+        line = line.TrimStart('\uFEFF', '\u200B');
+
         if (string.IsNullOrWhiteSpace(line))
         {
             error = "Empty input";

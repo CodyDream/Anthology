@@ -10,27 +10,29 @@ Supported methods: `initialize`, `notifications/initialized`, `tools/list`, `too
 
 ## How the Prowl editor hosts it
 
-The editor registers Prowl-specific tools and exposes them through the built-in CLI command `mcp_serve`. The CLI is a thin authenticated bridge to a **running** editor (it locates it via `<project>/Library/Cli.lock`), so the project must be open in the editor first.
+The editor registers 15 Prowl-specific tools in `Prowl.Editor/MCP/` and exposes them through the CLI `mcp` verb. The reason for a dedicated verb: CLI commands travel over a loopback socket to the editor process, so piping stdin into `prowl command mcp_serve` never reaches the editor's `Console.In`. Instead, `Library/prowl mcp` reads one JSON-RPC message per stdin line in the CLI process and forwards each line to the editor's `mcp_dispatch` command; each response line is written back to stdout. Notifications produce no output, as the protocol requires.
 
-Run it from the project folder (or pass `--project <path>`), with a timeout longer than the client session:
+The CLI locates a **running** editor via `<project>/Library/Cli.lock`, so the project must be open in the editor first. Run from the project folder (or pass `--project <path>`):
 
 ```powershell
 # From the project root; the editor must already be open on this project.
-.\Library\prowl command mcp_serve --timeout 3600
+.\Library\prowl mcp --timeout 3600
 ```
 
-`--timeout` is in seconds (default `120`, max `86400` = 24 hours). A short timeout will end the session mid-conversation. Do **not** pass `--json`: that prints the CLI envelope instead of the raw tool output and breaks the stdio framing. Exit codes: `0` success, `1` error, `130` cancelled (Ctrl+C).
+`--timeout` is in seconds (default `120`, max `86400` = 24 hours) and applies per dispatched call. Do **not** pass `--json`. Exit codes: `0` success, `1` error, `130` cancelled (Ctrl+C). The editor-side `mcp_serve` command is still available for direct/in-editor use, but it is not usable through CLI stdin piping.
+
+A leading UTF-8 BOM on the first line (e.g. from a PowerShell pipe) is tolerated; real MCP clients normally omit it.
 
 ## Configuring an MCP client
 
-Point the client at the CLI command and set the working directory to the project root. Example (`mcpServers` block in Claude Desktop, VS Code, opencode, etc.):
+Point the client at the CLI command with the `mcp` verb and set the working directory to the project root. Example (`mcpServers` block in Claude Desktop, VS Code, opencode, etc.):
 
 ```json
 {
   "mcpServers": {
     "prowl": {
       "command": "C:/path/to/project/Library/prowl",
-      "args": ["command", "mcp_serve", "--timeout", "3600"],
+      "args": ["mcp", "--timeout", "3600"],
       "cwd": "C:/path/to/project"
     }
   }
@@ -41,17 +43,21 @@ On Windows, quote paths with spaces. If `cwd` cannot be the project folder, add 
 
 ## First tool set
 
-The initial set is deliberately a thin bridge over the editor's existing CLI commands, so MCP clients can drive the editor without learning Prowl's internals. The runtime authority is always `tools/list`; the first registration contains:
+The initial 15 tools are a thin bridge over the editor's existing CLI commands plus direct scene-view control, so MCP clients can drive the editor without learning Prowl's internals. The runtime authority is always `tools/list`; the current registration contains:
 
 | Tool | Purpose |
 | --- | --- |
-| `status` | Current project, open scenes, dirty state, play/pause and compile state, selection, and the log cursor. |
-| `logs` | Editor logs, oldest first; pass the `logSeq` from `status` as `--since` to fetch only new lines. |
-| `list_commands` | Lists the editor CLI commands with descriptions and argument schemas — the discovery entry point. |
-| `run_command` | Runs any editor CLI command by name with positional/`--name value` arguments and returns its JSON result. |
-| `eval` | Compiles and runs a C# snippet on the editor main thread; a last-resort escape hatch (no undo). |
+| `prowl_status` | Current project, open scenes, dirty state, play/pause and compile state, selection, and the log cursor. Maps to CLI `status`. |
+| `scene_list` / `scene_open` | List open scenes or describe one, and open a scene from an Assets-relative path. |
+| `tree` / `select` | Inspect the hierarchy (with optional root/depth/filter) and select refs, optionally framing them. |
+| `get` / `set` | Read serialized fields or a field path; write field paths from JSON in one undo step. |
+| `component_add` / `go_create` | Add a component to a GameObject; create a GameObject. |
+| `camera_frame` | Select and frame a target in the scene view (CLI `select --frame`). |
+| `camera_projection` | Query or toggle perspective/orthographic on the scene camera. |
+| `scene_wireframe` / `scene_grid` / `scene_gizmos` | Toggle the scene-view wireframe, grid, and gizmo overlays. |
+| `lod_bias` | Read or set the LOD bias used by scene rendering. |
 
-`ping` is also available directly as a JSON-RPC method for liveness checks. Tool calls succeed with `content: [{ "type": "text", "text": ... }]` and an `isError` flag; use small, targeted commands (`tree`, `get`, `scene`, `go`, `component`, `asset`, `play`, `screenshot`, `api`) through `run_command` rather than reaching for `eval`.
+`ping` is also available directly as a JSON-RPC method for liveness checks. Tool calls succeed with `content: [{ "type": "text", "text": ... }]` and an `isError` flag; results are the underlying CLI JSON as text.
 
 ## Safety notes
 
