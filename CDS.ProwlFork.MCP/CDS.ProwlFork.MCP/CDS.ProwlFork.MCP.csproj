@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>$(ProwlTargetFrameworks)</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <RootNamespace>CDS.ProwlFork.MCP</RootNamespace>
+    <PackageId>CDS.ProwlFork.MCP</PackageId>
+    <Title>CDS.ProwlFork.MCP</Title>
+
+    <Description>A minimal, dependency-free MCP JSON-RPC 2.0 stdio server for exposing tools from any .NET application.</Description>
+
+    <PackageTags>mcp;json-rpc;stdio;tools;model-context-protocol;game-engine;prowl</PackageTags>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+</Project>
